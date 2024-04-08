@@ -8,8 +8,8 @@ from diffusers.models.transformer_temporal import (
     TransformerTemporalModelOutput,
 )
 
-from st2v.models.transformer_temporal_cross import (
-    TransformerTemporalModelCrossAttention,
+from vidxtend.models.transformer_temporal_cross_attention import (
+    TransformerTemporalCrossAttentionModel,
 )
 
 class CrossAttention(nn.Module):
@@ -72,7 +72,7 @@ class ConditionalModel(nn.Module):
                 cross_attention_dim=input_channels,
             )
         elif conditional_model == "cross_transformer":
-            self.temporal_transformer = TransformerTemporalModelCrossAttention(
+            self.temporal_transformer = TransformerTemporalCrossAttentionModel(
                 num_attention_heads=input_channels // attention_head_dim,
                 attention_head_dim=attention_head_dim,
                 in_channels=input_channels,

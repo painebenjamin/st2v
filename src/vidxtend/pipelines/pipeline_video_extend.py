@@ -7,53 +7,54 @@ import json
 import torch
 
 from typing import Optional, Union
+from PIL import Image
 from contextlib import ExitStack
 
-from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import AutoencoderKL, KarrasDiffusionSchedulers
+from transformers import (
+    CLIPTextModel,
+    CLIPTextConfig,
+    CLIPTokenizer
+)
+from transformers.modeling_utils import no_init_weights
+
+from diffusers import AutoencoderKL
+from diffusers.schedulers import KarrasDiffusionSchedulers, DDIMScheduler
 from diffusers.utils import is_accelerate_available, is_xformers_available
 
-from accelerate import init_empty_weights, set_module_tensor_to_device
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
+
 from huggingface_hub import hf_hub_download
 
-from st2v.pipelines.text_to_video import TextToVideoSDPipeline
-from st2v.models import (
+from vidxtend.models import (
     UNet3DConditionModel,
     ControlNetModel,
     FrozenOpenCLIPImageEmbedder,
     ImageEmbeddingContextResampler,
+    NoiseGenerator,
+    MaskGenerator,
 )
-from st2v.utils import logger, iterate_state_dict
+from vidxtend.utils import (
+    logger,
+    fit_image,
+    iterate_state_dict,
+    IMAGE_ANCHOR_LITERAL,
+    IMAGE_FIT_LITERAL
+)
+from vidxtend.pipelines.pipeline_text_to_video import TextToVideoSDPipeline
 
-class StreamingTextToVideoPipeline(TextToVideoSDPipeline):
-    def __init__(
-        self,
-        vae: AutoencoderKL,
-        text_encoder: CLIPTextModel,
-        tokenizer: CLIPTokenizer,
-        unet: UNet3DConditionModel,
-        controlnet: ControlNetModel,
-        scheduler: KarrasDiffusionSchedulers,
-        image_encoder: Optional[FrozenOpenCLIPImageEmbedder]=None,
-        resampler: Optional[ImageEmbeddingContextResampler]=None,
-    ):
-        super(StreamingTextToVideoPipeline, self).__init__(
-            vae=vae,
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            unet=unet,
-            controlnet=controlnet,
-            scheduler=scheduler,
-        )
-        self.register_modules(
-            image_encoder=image_encoder,
-            resampler=resampler,
-        )
+def is_accelerate_available():
+    return False
+
+class VideoExtendPipeline(TextToVideoSDPipeline):
+    _exclude_from_cpu_offload = ["controlnet"]
+    model_cpu_offload_seq = "image_encoder->resampler->text_encoder->unet->vae"
 
     @classmethod
     def from_single_file(
+        cls,
         file_path_or_repository: str,
-        filename: str="s2tv.safetensors",
+        filename: str="vidxtend.safetensors",
         config_filename: str="config.json",
         variant: Optional[str]=None,
         subfolder: Optional[str]=None,
@@ -114,15 +115,22 @@ class StreamingTextToVideoPipeline(TextToVideoSDPipeline):
             raise FileNotFoundError(f"File {config_path} not found.")
 
         with open(config_path, "r") as f:
-            st2v_config = json.load(f)
+            vidxtend_config = json.load(f)
 
+        repo_id = "damo-vilab/text-to-video-ms-1.7b"
         # Create the scheduler
-        scheduler = DDIMScheduler(**st2v_config["scheduler"])
+        scheduler = DDIMScheduler.from_pretrained(repo_id, subfolder="scheduler")
+
+        # Create the noise generator
+        noise_generator = None
+
+        # Create the mask generator
+        mask_generator = MaskGenerator.from_config(vidxtend_config["mask_generator"])
 
         # Create tokenizer (downloaded)
         tokenizer = CLIPTokenizer.from_pretrained(
-            st2v_config["tokenizer"]["model"],
-            subfolder=st2v_config["tokenizer"].get("subfolder", None),
+            vidxtend_config["tokenizer"]["model"],
+            subfolder=vidxtend_config["tokenizer"].get("subfolder", None),
             cache_dir=cache_dir,
         )
 
@@ -132,21 +140,20 @@ class StreamingTextToVideoPipeline(TextToVideoSDPipeline):
             context.enter_context(no_init_weights())
             context.enter_context(init_empty_weights())
 
-        with context:
-            # UNet
-            unet = UNet3DConditionModel.from_config(st2v_config["unet"])
+        # UNet
+        unet = UNet3DConditionModel.from_pretrained(repo_id, subfolder="unet")
 
-            # VAE
-            vae = AutoencoderKL.from_config(st2v_config["vae"])
+        # VAE
+        vae = AutoencoderKL.from_pretrained(repo_id, subfolder="vae")
 
-            # Text encoder
-            text_encoder = CLIPTextModel.from_config(st2v_config["text_encoder"])
+        # Text encoder
+        text_encoder = CLIPTextModel.from_pretrained(repo_id, subfolder="text_encoder")
 
-            # Image encoder
-            image_encoder = FrozenOpenCLIPImageEmbedder.from_config(st2v_config["image_encoder"])
+        # Resampler
+        resampler = ImageEmbeddingContextResampler(**vidxtend_config["resampler"])
 
-            # Resampler
-            resampler = ImageEmbeddingContextResampler.from_config(st2v_config["resampler"])
+        # Image encoder
+        image_encoder = FrozenOpenCLIPImageEmbedder(**vidxtend_config["image_encoder"])
 
         # Load the weights
         logger.debug("Models created, loading weights...")
@@ -180,20 +187,18 @@ class StreamingTextToVideoPipeline(TextToVideoSDPipeline):
 
         if not is_accelerate_available():
             try:
-                unet.load_state_dict(state_dicts["unet"])
-                vae.load_state_dict(state_dicts["vae"])
+                unet.load_state_dict(state_dicts["unet"], strict=False)
+                vae.load_state_dict(state_dicts["vae"], strict=False)
                 image_encoder.load_state_dict(state_dicts["image_encoder"], strict=False)
-                text_encoder.load_state_dict(state_dicts["text_encoder"])
-                resampler.load_state_dict(state_dicts["resampler"])
-                del state_dicts
-                gc.collect()
+                text_encoder.load_state_dict(state_dicts["text_encoder"], strict=False)
+                resampler.load_state_dict(state_dicts["resampler"], strict=False)
             except KeyError as ex:
                 raise RuntimeError(f"File did not provide a state dict for {ex}")
 
         # Create controlnet
         controlnet = ControlNetModel.from_unet(
             unet,
-            **st2v_config["controlnet"]
+            **vidxtend_config["controlnet"]
         )
 
         # Load controlnet state dict
@@ -211,26 +216,66 @@ class StreamingTextToVideoPipeline(TextToVideoSDPipeline):
             scheduler=scheduler,
             controlnet=controlnet,
             resampler=resampler,
+            tokenizer=tokenizer,
+            noise_generator=noise_generator,
+            mask_generator=mask_generator,
         )
 
         if torch_dtype is not None:
             pipeline.to(torch_dtype)
 
-        pipeline.to(device)
-
         if is_xformers_available():
-            from st2v.models.processor import set_use_memory_efficient_attention_xformers
+            from vidxtend.models.processor import set_use_memory_efficient_attention_xformers
             set_use_memory_efficient_attention_xformers(
                 unet,
-                num_frames_conditioning=unet.config.num_frames_conditioning,
-                num_frames=unet.config.num_frames,
+                num_frames_conditioning=controlnet.config.num_frames_conditioning,
+                num_frames=controlnet.config.num_frames,
             )
             set_use_memory_efficient_attention_xformers(
                 controlnet,
-                num_frames_conditioning=unet.config.num_frames_conditioning,
-                num_frames=unet.config.num_frames,
+                num_frames_conditioning=controlnet.config.num_frames_conditioning,
+                num_frames=controlnet.config.num_frames,
             )
         else:
             logger.warning("XFormers is not available, falling back to PyTorch attention")
 
         return pipeline
+
+    def __call__(
+        self,
+        images: List[Image.Image],
+        prompt: str,
+        num_frames: int=24,
+        negative_prompt: Optional[str]=None,
+        guidance_scale: float=7.5,
+        num_inference_steps: int=25,
+        anchor: IMAGE_ANCHOR_LITERAL="top-left",
+        fit: IMAGE_FIT_LITERAL="cover",
+    ) -> List[Image.Image]:
+        """
+        Extends a video.
+        """
+        image_size = self.unet.config.sample_size * self.vae_scale_factor
+        images = fit_image(
+            images,
+            width=image_size,
+            height=image_size,
+            fit=fit,
+            anchor=anchor
+        )
+        while len(images) < num_frames:
+            result = super().__call__(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                image=images[-8:],
+                input_frames_conditioning=images[:1],
+                eta=1.0,
+                output_type="pil"
+            )
+            images.extend(result.frames[8:])
+            self.reset_noise_generator_state()
+            torch.cuda.empty_cache()
+            gc.collect()
+        return images[:num_frames]

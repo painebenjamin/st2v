@@ -22,7 +22,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.embeddings import ImagePositionalEmbeddings
 from diffusers.utils import BaseOutput, deprecate
 
-from st2v.models.attention import BasicTransformerBlock
+from vidxtend.models.attention import BasicTransformerBlock
 from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.modeling_utils import ModelMixin
 

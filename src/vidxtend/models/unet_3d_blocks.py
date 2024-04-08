@@ -22,8 +22,8 @@ from diffusers.models.resnet import (
     Upsample2D,
 )
 
-from st2v.models.transformer_2d import Transformer2DModel
-from st2v.models.transformer_temporal import TransformerTemporalModel
+from vidxtend.models.transformer_2d import Transformer2DModel
+from vidxtend.models.transformer_temporal import TransformerTemporalModel
 
 # Assign gradient checkpoint function to simple variable for readability.
 g_c = checkpoint.checkpoint

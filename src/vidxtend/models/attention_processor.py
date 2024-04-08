@@ -21,7 +21,7 @@ from torch import nn
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
 
-from st2v.utils import logger
+from vidxtend.utils import logger
 
 
 if is_xformers_available():

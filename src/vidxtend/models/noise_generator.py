@@ -3,11 +3,14 @@ import numbers
 import torch
 import torch.fft as fft
 
+from typing import List
+
 from einops import rearrange
 from math import sqrt
 from torch import nn
 from torch.nn import functional
-from typing import List
+
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 
 # adapted from https://discuss.pytorch.org/t/is-there-anyway-to-do-gaussian-filtering-for-an-image-2d-3d-in-pytorch/12351/10
 # and https://discuss.pytorch.org/t/is-there-anyway-to-do-gaussian-filtering-for-an-image-2d-3d-in-pytorch/12351/19
@@ -65,15 +68,18 @@ def gaussian_smoothing_kernel(shape, kernel_size, sigma, dim=2):
     return kernel
 
 
-class NoiseGenerator:
+class NoiseGenerator(ConfigMixin):
+    config_name = "noise_config.json"
+    @register_to_config
     def __init__(
         self,
         alpha: float = 0.0,
         shared_noise_across_chunks: bool = False,
-        mode="vanilla",
+        mode: str = "vanilla",
         forward_steps: int = 850,
         radius: List[float] = None,
     ) -> None:
+        super().__init__()
         self.mode = mode
         self.alpha = alpha
         self.shared_noise_across_chunks = shared_noise_across_chunks

@@ -56,7 +56,6 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
         self,
         arch="ViT-H-14",
         version="laion2b_s32b_b79k",
-        device="cuda",
         max_length=77,
         freeze=True,
         antialias=True,
@@ -78,7 +77,6 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
         self.max_crops = num_image_crops
         self.pad_to_max_len = self.max_crops > 0
         self.repeat_to_max_len = repeat_to_max_len and (not self.pad_to_max_len)
-        self.device = device
         self.max_length = max_length
         if freeze:
             self.freeze()

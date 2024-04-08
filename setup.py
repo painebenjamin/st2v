@@ -26,24 +26,24 @@ deps = [
 ]
 
 setup(
-    name="st2v",
+    name="vidxtend",
     version="0.1.0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
-    description="StreamingT2V: Consistent, Dynamic, and Extendable Long Video Generation from Text",
+    description="Stage 2 of StreamingT2V: Consistent, Dynamic, and Extendable Long Video Generation from Text",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     license="BigScience Open RAIL-M License",
-    author="Roberto Henschel, Levon Khachatryan, Daniil Hayrapetyan, Hayk Poghosyan, Vahram Tadevosyan, Zhangyang Wang, Shant Navasardyan, Humphrey Shi",
-    author_email="huaweiwei@tencent.com",
+    author="Roberto Henschel, Levon Khachatryan, Daniil Hayrapetyan, Hayk Poghosyan, Vahram Tadevosyan, Zhangyang Wang, Shant Navasardyan, Humphrey Shi, Benjamin Paine",
+    author_email="painebenjamin@gmail.com",
     url="https://streamingt2v.github.io/",
     package_dir={"": "src"},
     packages=find_packages("src"),
-    package_data={"st2v": ["py.typed", "data/*"]},
+    package_data={"vidxtend": ["py.typed", "data/*"]},
     include_package_data=True,
     python_requires=">=3.8.0",
     install_requires=deps,
     entry_points={
         "console_scripts": [
-            "st2v = st2v.__main__:main"
+            "vidxtend = vidxtend.__main__:main"
         ]
     },
     classifiers=[

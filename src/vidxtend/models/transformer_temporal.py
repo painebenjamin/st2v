@@ -22,7 +22,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput
 from diffusers.models.modeling_utils import ModelMixin
 
-from st2v.models.attention import BasicTransformerBlock
+from vidxtend.models.attention import BasicTransformerBlock
 
 
 @dataclass

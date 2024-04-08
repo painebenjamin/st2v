@@ -25,7 +25,7 @@ from diffusers.models.attention_processor import AttentionProcessor, AttnProcess
 
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
-from st2v.models.unet_3d_blocks import (
+from vidxtend.models.unet_3d_blocks import (
     CrossAttnDownBlock3D,
     CrossAttnUpBlock3D,
     DownBlock3D,
@@ -36,10 +36,11 @@ from st2v.models.unet_3d_blocks import (
     transformer_g_c,
 )
 
-from st2v.models.unet_3d_condition import UNet3DConditionModel
-from st2v.models.transformer_temporal import TransformerTemporalModel
-from st2v.models.conv_channels import Conv2DSubChannels
-from st2v.utils import logger
+from vidxtend.models.unet_3d_condition import UNet3DConditionModel
+from vidxtend.models.transformer_temporal import TransformerTemporalModel
+from vidxtend.models.conv_channels import Conv2DSubChannels
+from vidxtend.models.conditioning import ConditionalModel
+from vidxtend.utils import logger
 
 
 @dataclass
@@ -312,7 +313,7 @@ class ControlNetModel(ModelMixin, ConfigMixin):
         use_controlnet_mask: bool = False,
         use_image_embedding: bool = False,
         use_image_encoder_normalization: bool = False,
-        use_image_tokens: bool = False
+        use_image_tokens: bool = False,
         use_repeat_context_img: bool = True,
     ):
         super().__init__()
@@ -515,7 +516,6 @@ class ControlNetModel(ModelMixin, ConfigMixin):
         num_frames_conditioning: int = 8,
         frame_expansion: str = "zero",
         num_tranformers: int = 1,
-        vae=None,
         zero_conv_mode: str = "2d",
         merging_mode: str = "addition",
         use_controlnet_mask: bool = False,
@@ -547,13 +547,12 @@ class ControlNetModel(ModelMixin, ConfigMixin):
             num_frames=num_frames,
             frame_expansion=frame_expansion,
             num_tranformers=num_tranformers,
-            vae=vae,
             zero_conv_mode=zero_conv_mode,
             merging_mode=merging_mode,
-            condition_encoder=condition_encoder,
             use_controlnet_mask=use_controlnet_mask,
             use_image_embedding=use_image_embedding,
             use_image_encoder_normalization=use_image_encoder_normalization,
+            use_image_tokens=unet.config.use_image_tokens,
         )
 
         if load_weights_from_unet:
@@ -576,8 +575,8 @@ class ControlNetModel(ModelMixin, ConfigMixin):
 
         return controlnet
 
-    @property
     # Copied from diffusers.models.unet_3d_condition.UNet3DConditionModel.attn_processors
+    @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
         r"""
         Returns:

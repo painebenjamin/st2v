@@ -26,8 +26,8 @@ from diffusers.utils import BaseOutput, logging
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
 
-from st2v.models.transformer_temporal import TransformerTemporalModel
-from st2v.models.unet_3d_blocks import (
+from vidxtend.models.transformer_temporal import TransformerTemporalModel
+from vidxtend.models.unet_3d_blocks import (
     CrossAttnDownBlock3D,
     CrossAttnUpBlock3D,
     DownBlock3D,
@@ -37,10 +37,10 @@ from st2v.models.unet_3d_blocks import (
     get_up_block,
     transformer_g_c,
 )
-from st2v.models.conditioning import ConditionalModel
-from st2v.models.conv_channels import Conv2DExtendedChannels
+from vidxtend.models.conditioning import ConditionalModel
+from vidxtend.models.conv_channels import Conv2DExtendedChannels
 
-from st2v.utils import logger
+from vidxtend.utils import logger
 
 
 @dataclass
@@ -118,7 +118,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         use_fps_conditioning: bool = False,
         concat: bool = False,
         use_image_tokens: bool = False,
-        use_repeat_context_img: bool = False,
+        use_repeat_context_img: bool = True,
         use_channel_expansion: bool = False
     ):
         super().__init__()
@@ -194,7 +194,6 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.up_blocks = nn.ModuleList([])
 
         self.merging_mode = merging_mode
-        print("self.merging_mode", self.merging_mode)
         if self.merging_mode.startswith("attention"):
             self.cross_attention_merger_down_blocks = nn.ModuleList([])
             self.cross_attention_merger_mid_block = nn.ModuleList([])
@@ -458,7 +457,6 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         """
         debug = False
         if self.use_fps_conditioning:
-
             if torch.is_tensor(fps):
                 assert (fps > -1).all(), "FPS not set"
                 if len(fps.shape) == 0:
@@ -475,6 +473,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             fps_proj = self.fps_proj(fps)
             fps_proj = fps_proj.to(dtype=self.dtype)
             fps_emb = self.fps_embedding(fps_proj)
+
         # 1. time
         timesteps = timestep
         if not torch.is_tensor(timesteps):
@@ -510,7 +509,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
         if not self.use_image_tokens and encoder_hidden_states.shape[1] > 77:
             encoder_hidden_states = encoder_hidden_states[:, :77]
-        # print(f"MAIN with tokens = {encoder_hidden_states.shape[1]}")
+
         if encoder_hidden_states.shape[1] > 77:
             # assert (
             #     encoder_hidden_states.shape[1]-77) % num_frames == 0, f"Encoder shape {encoder_hidden_states.shape}. Num frames = {num_frames}"

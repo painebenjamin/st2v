@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from diffusers.models.embeddings import CombinedTimestepLabelEmbeddings
 from diffusers.utils.import_utils import is_xformers_available
 
-from st2v.models.attention_processor import Attention
+from vidxtend.models.attention_processor import Attention
 
 
 if is_xformers_available():

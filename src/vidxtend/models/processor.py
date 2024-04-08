@@ -5,7 +5,7 @@ from typing import Callable, Optional, Union
 from einops import repeat, rearrange
 from diffusers.utils.import_utils import is_xformers_available
 
-from st2v.models.attention_processor import Attention
+from vidxtend.models.attention_processor import Attention
 
 if is_xformers_available():
     import xformers
@@ -128,7 +128,6 @@ class XFormersAttnProcessor:
             assert (
                 not self.spatial_attend_on_condition_frames
             ), "Not implemented together with image embedding"
-
             alpha = attn.alpha
             encoder_hidden_states_txt = encoder_hidden_states[:, :77, :]
 

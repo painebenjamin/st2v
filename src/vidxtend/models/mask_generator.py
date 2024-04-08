@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 __all__ = ["MaskGenerator"]
 
 class MaskGenerator(ConfigMixin):
+    config_name = "mask_config.json"
     @register_to_config
     def __init__(
         self,
@@ -17,8 +18,6 @@ class MaskGenerator(ConfigMixin):
         num_frames: int,
         temporal_self_attention_only_on_conditioning: bool = False,
         temporal_self_attention_mask_included_itself: bool = False,
-        spatial_attend_on_condition_frames: bool = False,
-        temp_attend_on_neighborhood_of_condition_frames: bool = False,
         temp_attend_on_uncond_include_past: bool = False,
     ):
         super().__init__()
