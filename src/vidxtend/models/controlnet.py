@@ -521,6 +521,7 @@ class ControlNetModel(ModelMixin, ConfigMixin):
         use_controlnet_mask: bool = False,
         use_image_embedding: bool = False,
         use_image_encoder_normalization: bool = False,
+        use_image_tokens: bool = False,
         **kwargs,
     ):
         r"""
@@ -552,7 +553,7 @@ class ControlNetModel(ModelMixin, ConfigMixin):
             use_controlnet_mask=use_controlnet_mask,
             use_image_embedding=use_image_embedding,
             use_image_encoder_normalization=use_image_encoder_normalization,
-            use_image_tokens=unet.config.use_image_tokens,
+            use_image_tokens=use_image_tokens,
         )
 
         if load_weights_from_unet:

@@ -1,2 +1,2 @@
-from vidxtend.pipelines.pipeline_text_to_video import TextToVideoSDPipeline, TextToVideoSDPipelineOutput
-from vidxtend.pipelines.pipeline_video_extend import VideoExtendPipeline
+from vidxtend.pipelines.pipeline_vidxtend import VidXTendPipeline
+__all__ = ["VidXTendPipeline"]

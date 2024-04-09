@@ -46,7 +46,6 @@ class AbstractEncoder(ModelMixin, ConfigMixin):
     def encode(self, *args, **kwargs):
         raise NotImplementedError
 
-
 class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
     """
     Uses the OpenCLIP vision transformer encoder for images
@@ -67,7 +66,7 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
     ):
         super().__init__()
         import open_clip
-        model, _, _ = open_clip.create_model_and_transforms(
+        model = open_clip.create_model(
             arch,
             device=torch.device("cpu"),
             pretrained=version,

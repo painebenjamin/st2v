@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,29 +12,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
+import re
+import gc
+import json
+import torch
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Union
-
 import PIL.Image
 import numpy as np
-import torch
-from transformers import CLIPTextModel, CLIPTokenizer
+
+from typing import Any, Callable, Dict, List, Optional, Union
+from contextlib import ExitStack
+from einops import rearrange
+
+from transformers import CLIPTextModel, CLIPTextConfig, CLIPTokenizer
+from transformers.modeling_utils import no_init_weights
 
 from diffusers.image_processor import VaeImageProcessor, PipelineImageInput
 from diffusers.loaders import TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL
-from diffusers.schedulers import KarrasDiffusionSchedulers
+from diffusers.schedulers import KarrasDiffusionSchedulers, DDIMScheduler
 from diffusers.utils import (
     PIL_INTERPOLATION,
     is_accelerate_available,
-    is_accelerate_version,
-    logging,
-    replace_example_docstring,
+    is_xformers_available,
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.text_to_video_synthesis import TextToVideoSDPipelineOutput
+
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
+
+from huggingface_hub import hf_hub_download
 
 from vidxtend.models import (
     UNet3DConditionModel,
@@ -44,33 +55,13 @@ from vidxtend.models import (
     ImageEmbeddingContextResampler,
 )
 
-from vidxtend.utils import logger, debug_tensors
-
-from einops import rearrange
-
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
-EXAMPLE_DOC_STRING = """
-    Examples:
-        ```py
-        >>> import torch
-        >>> from diffusers import TextToVideoSDPipeline
-        >>> from diffusers.utils import export_to_video
-
-        >>> pipe = TextToVideoSDPipeline.from_pretrained(
-        ...     "damo-vilab/text-to-video-ms-1.7b", torch_dtype=torch.float16, variant="fp16"
-        ... )
-        >>> pipe.enable_model_cpu_offload()
-
-        >>> prompt = "Spiderman is surfing"
-        >>> video_frames = pipe(prompt).frames
-        >>> video_path = export_to_video(video_frames)
-        >>> video_path
-        ```
-"""
+from vidxtend.utils import logger, iterate_state_dict
 
 def tensor2vid(
-    video: torch.Tensor, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], output_type="list"
+    video: torch.Tensor,
+    mean=[0.5, 0.5, 0.5],
+    std=[0.5, 0.5, 0.5],
+    output_type="list"
 ) -> List[np.ndarray]:
     # This code is copied from https://github.com/modelscope/modelscope/blob/1509fdb973e5871f37148a4b5e5964cafd43e64d/modelscope/pipelines/multi_modal/text_to_video_synthesis_pipeline.py#L78
     # reshape to ncfhw
@@ -94,8 +85,10 @@ def tensor2vid(
         pass
     return images
 
+class VidXTendPipelineOutput(TextToVideoSDPipelineOutput):
+    pass
 
-class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
+class VidXTendPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
     r"""
     Pipeline for text-to-video generation.
 
@@ -115,6 +108,9 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
     """
+    _exclude_from_cpu_offload = []
+    _optional_components = ["resampler"]
+    model_cpu_offload_seq = "text_encoder->unet->vae"
 
     def __init__(
         self,
@@ -125,9 +121,15 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         controlnet: ControlNetModel,
         scheduler: KarrasDiffusionSchedulers,
         noise_generator: Optional[NoiseGenerator]=None,
-        mask_generator: Optional[MaskGenerator]=None,
-        image_encoder: Optional[FrozenOpenCLIPImageEmbedder]=None,
         resampler: Optional[ImageEmbeddingContextResampler]=None,
+        num_frames: int=16,
+        num_frames_conditioning: int=8,
+        temporal_self_attention_only_on_conditioning: bool=False,
+        temporal_self_attention_mask_included_itself: bool=False,
+        spatial_attend_on_condition_frames: bool=False,
+        temp_attend_on_uncond_include_past: bool=False,
+        temp_attend_on_neighborhood_of_condition_frames: bool=False,
+        image_encoder_version: str="laion2b_s32b_b79k",
     ):
         super().__init__()
         self.register_modules(
@@ -137,13 +139,232 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             unet=unet,
             controlnet=controlnet,
             scheduler=scheduler,
-            noise_generator=noise_generator,
-            mask_generator=mask_generator,
-            image_encoder=image_encoder,
             resampler=resampler,
+            noise_generator=noise_generator,
         )
+        self.register_to_config(
+            num_frames=num_frames,
+            num_frames_conditioning=num_frames_conditioning,
+            temporal_self_attention_only_on_conditioning=temporal_self_attention_only_on_conditioning,
+            temporal_self_attention_mask_included_itself=temporal_self_attention_mask_included_itself,
+            spatial_attend_on_condition_frames=spatial_attend_on_condition_frames,
+            temp_attend_on_uncond_include_past=temp_attend_on_uncond_include_past,
+            temp_attend_on_neighborhood_of_condition_frames=temp_attend_on_neighborhood_of_condition_frames,
+            image_encoder_version=image_encoder_version,
+        )
+        self.mask_generator = MaskGenerator(
+            num_frames=num_frames,
+            num_frames_conditioning=num_frames_conditioning,
+            temporal_self_attention_only_on_conditioning=temporal_self_attention_only_on_conditioning,
+            temporal_self_attention_mask_included_itself=temporal_self_attention_mask_included_itself,
+            temp_attend_on_uncond_include_past=temp_attend_on_uncond_include_past
+        )
+        self.image_encoder = FrozenOpenCLIPImageEmbedder(version=image_encoder_version)
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+    def set_use_memory_efficient_attention_xformers(
+        self, 
+        valid: bool=True,
+        attention_op: Optional[Callable]=None
+    ) -> None:
+        """
+        Set the memory efficient attention for the model.
+        """
+        from vidxtend.models.processor import set_use_memory_efficient_attention_xformers
+        for model in [self.unet, self.controlnet]:
+            set_use_memory_efficient_attention_xformers(
+                model,
+                num_frames_conditioning=self.config.num_frames_conditioning,
+                num_frames=self.config.num_frames,
+                temporal_self_attention_only_on_conditioning=self.config.temporal_self_attention_only_on_conditioning,
+                temporal_self_attention_mask_included_itself=self.config.temporal_self_attention_mask_included_itself,
+                spatial_attend_on_condition_frames=self.config.spatial_attend_on_condition_frames,
+                temp_attend_on_neighborhood_of_condition_frames=self.config.temp_attend_on_neighborhood_of_condition_frames,
+                temp_attend_on_uncond_include_past=self.config.temp_attend_on_uncond_include_past,
+                valid=valid,
+                attention_op=attention_op,
+            )
+
+    @classmethod
+    def from_single_file(
+        cls,
+        file_path_or_repository: str,
+        filename: str="vidxtend.safetensors",
+        config_filename: str="config.json",
+        variant: Optional[str]=None,
+        subfolder: Optional[str]=None,
+        device: Optional[Union[str, torch.device]]=None,
+        torch_dtype: Optional[torch.dtype]=None,
+        cache_dir: Optional[str]=None,
+    ) -> TextToVideoSDPipeline:
+        """
+        Load a streaming text-to-video pipeline from a file or repository.
+        """
+        if variant is not None:
+            filename, ext = os.path.splitext(filename)
+            filename = f"{filename}.{variant}{ext}"
+
+        if device is None:
+            device = "cpu"
+        else:
+            device = str(device)
+
+        if os.path.isdir(file_path_or_repository):
+            model_dir = file_path_or_repository
+            if subfolder:
+                model_dir = os.path.join(model_dir, subfolder)
+            file_path = os.path.join(model_dir, filename)
+            config_path = os.path.join(model_dir, config_filename)
+        elif os.path.isfile(file_path_or_repository):
+            file_path = file_path_or_repository
+            if os.path.isfile(config_filename):
+                config_path = config_filename
+            else:
+                config_path = os.path.join(os.path.dirname(file_path), config_filename)
+                if not os.path.exists(config_path) and subfolder:
+                    config_path = os.path.join(os.path.dirname(file_path), subfolder, config_filename)
+        elif re.search(r"^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$", file_path_or_repository):
+            file_path = hf_hub_download(
+                file_path_or_repository,
+                filename,
+                subfolder=subfolder,
+                cache_dir=cache_dir,
+            )
+            try:
+                config_path = hf_hub_download(
+                    file_path_or_repository,
+                    config_filename,
+                    subfolder=subfolder,
+                    cache_dir=cache_dir,
+                )
+            except:
+                config_path = hf_hub_download(
+                    file_path_or_repository,
+                    config_filename,
+                    cache_dir=cache_dir,
+                )
+        else:
+            raise FileNotFoundError(f"File {file_path_or_repository} is not a repository that can be downloaded or a file that can be loaded.")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File {file_path} not found.")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"File {config_path} not found.")
+
+        with open(config_path, "r") as f:
+            vidxtend_config = json.load(f)
+
+        # Create the scheduler
+        scheduler = DDIMScheduler.from_config(vidxtend_config["scheduler"])
+
+        # Create tokenizer (downloaded)
+        tokenizer = CLIPTokenizer.from_pretrained(
+            vidxtend_config["tokenizer"]["model"],
+            subfolder=vidxtend_config["tokenizer"].get("subfolder", None),
+            cache_dir=cache_dir,
+        )
+
+        # Create the base models
+        context = ExitStack()
+        if is_accelerate_available():
+            context.enter_context(no_init_weights())
+            context.enter_context(init_empty_weights())
+
+        with context:
+            # UNet
+            unet = UNet3DConditionModel.from_config(vidxtend_config["unet"])
+
+            # VAE
+            vae = AutoencoderKL.from_config(vidxtend_config["vae"])
+
+            # Text encoder
+            text_encoder = CLIPTextModel(CLIPTextConfig(**vidxtend_config["text_encoder"]))
+
+            # Resampler
+            resampler = ImageEmbeddingContextResampler.from_config(vidxtend_config["resampler"])
+
+        # Load the weights
+        state_dicts = {}
+        for key, value in iterate_state_dict(file_path):
+            try:
+                module, _, key = key.partition(".")
+                if is_accelerate_available():
+                    if module == "unet":
+                        set_module_tensor_to_device(unet, key, device=device, value=value)
+                    elif module == "vae":
+                        set_module_tensor_to_device(vae, key, device=device, value=value)
+                    elif module == "text_encoder":
+                        set_module_tensor_to_device(text_encoder, key, device=device, value=value)
+                    elif module == "resampler":
+                        set_module_tensor_to_device(resampler, key, device=device, value=value)
+                    elif module == "controlnet":
+                        if "controlnet" not in state_dicts:
+                            state_dicts["controlnet"] = {}
+                        state_dicts["controlnet"][key] = value
+                    else:
+                        raise ValueError(f"Unknown module: {module}")
+                else:
+                    if module not in state_dicts:
+                        state_dicts[module] = {}
+                    state_dicts[module][key] = value
+            except (AttributeError, KeyError, ValueError) as ex:
+                logger.warning(f"Skipping module {module} key {key} due to {type(ex)}: {ex}")
+
+        if not is_accelerate_available():
+            try:
+                unet.load_state_dict(state_dicts["unet"], strict=False)
+                vae.load_state_dict(state_dicts["vae"], strict=False)
+                text_encoder.load_state_dict(state_dicts["text_encoder"], strict=False)
+                resampler.load_state_dict(state_dicts["resampler"], strict=False)
+            except KeyError as ex:
+                raise RuntimeError(f"File did not provide a state dict for {ex}")
+
+        # Create controlnet
+        controlnet = ControlNetModel.from_unet(
+            unet,
+            **vidxtend_config["controlnet"]
+        )
+
+        # Load controlnet state dict
+        controlnet.load_state_dict(state_dicts["controlnet"], strict=False)
+
+        # Cleanup
+        del state_dicts
+        gc.collect()
+
+        # Create the pipeline
+        pipeline = cls(
+            unet=unet,
+            vae=vae,
+            text_encoder=text_encoder,
+            scheduler=scheduler,
+            controlnet=controlnet,
+            tokenizer=tokenizer,
+            resampler=resampler,
+            num_frames=vidxtend_config.get("num_frames", 16),
+            num_frames_conditioning=vidxtend_config.get("num_frames_conditioning", 8),
+            temporal_self_attention_only_on_conditioning=vidxtend_config.get("temporal_self_attention_only_on_conditioning", False),
+            temporal_self_attention_mask_included_itself=vidxtend_config.get("temporal_self_attention_mask_included_itself", False),
+            spatial_attend_on_condition_frames=vidxtend_config.get("spatial_attend_on_condition_frames", False),
+            temp_attend_on_uncond_include_past=vidxtend_config.get("temp_attend_on_uncond_include_past", False),
+            temp_attend_on_neighborhood_of_condition_frames=vidxtend_config.get("temp_attend_on_neighborhood_of_condition_frames", False),
+            image_encoder_version=vidxtend_config.get("image_encoder_version", "laion2b_s32b_b79k"),
+        )
+
+        if torch_dtype is not None:
+            pipeline.to(torch_dtype)
+
+        return pipeline
+
+    def to(self, *args, **kwargs):
+        """
+        Move the model to the specified device.
+        We manually move the image encoder to the same device as the model, as it's
+        created as a frozen module and not added to the normal diffusers pipeline modules.
+        """
+        super().to(*args, **kwargs)
+        kwargs.pop("silence_dtype_warnings", None)
+        self.image_encoder.to(*args, **kwargs)
 
     def prepare_image(
         self,
@@ -574,7 +795,6 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             self.noise_generator.reset_noise_generator_state()
 
     @torch.no_grad()
-    @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -702,15 +922,17 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                 device=device, dtype=self.controlnet.dtype
             ) # 1 f c h w
 
-        debug_tensors(image=image, input_frames_conditioning=input_frames_conditioning)
-
         if self.image_encoder is not None and self.resampler is not None and image is not None:
+            self.image_encoder.to(device)
+            self.resampler.to(device)
             bsz = image.shape[0]
             image_for_conditioning = rearrange(input_frames_conditioning, "B F C W H -> (B F) C W H")
             image_enc = self.image_encoder(image_for_conditioning)
             img_cond = self.resampler(image_enc, batch_size=bsz)
             image_enc_unc = self.image_encoder(torch.zeros_like(image_for_conditioning))
             img_cond_unc = self.resampler(image_enc_unc, batch_size=bsz)
+            self.image_encoder.to("cpu")
+            self.resampler.to("cpu")
         else:
             img_cond = None
             img_cond_unc = None
@@ -844,7 +1066,8 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         else:
             attention_mask = None
 
-        self.controlnet.to(device)
+        if not skip_conditioning:
+            self.controlnet.to(device)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -945,6 +1168,9 @@ class TextToVideoSDPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
+
+        if not skip_conditioning:
+            self.controlnet.to("cpu")
 
         latents_video = latents[:, :num_channels_ctrl]
         if of_channels > 0:
